@@ -128,7 +128,8 @@ auto_augment: randaugment # (str) classification auto augmentation policy: randa
 erasing: 0.4 # (float) random erasing probability for classification (0.0–1.0)
 
 # Semantic conditioning ------------------------------------------------------------------------------------------------
-sem_warmup: 5 # (int) epochs before semantic loss activates
+sem_warmup: 5 # (int) epochs before semantic loss activates (-1 = disable semantic entirely)
+sem_active: false # (bool) runtime gate — set automatically by trainer, do not set manually
 tau: 0.07 # (float) InfoNCE temperature
 sem_weight: null # (float, optional) semantic loss weight — null = learned automatically
 neg_weight: null # (float, optional) negative loss weight — null = learned automatically
