@@ -8,6 +8,7 @@ from copy import copy
 from typing import Any
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -21,8 +22,8 @@ from ultralytics.nn.tasks import DetectionModel
 from ultralytics.utils import DEFAULT_CFG, LOGGER, RANK
 from ultralytics.utils.patches import override_configs
 from ultralytics.utils.plotting import plot_images, plot_labels
-from ultralytics.utils.torch_utils import torch_distributed_zero_first, unwrap_model
 from ultralytics.utils.semantic import CLIPTextEncoder, SemanticLossParams, SemanticProjectionHead
+from ultralytics.utils.torch_utils import torch_distributed_zero_first, unwrap_model
 
 
 class DetectionTrainer(BaseTrainer):
@@ -180,7 +181,7 @@ class DetectionTrainer(BaseTrainer):
 
         # Validate and resolve semantic hyperparameters before training starts
         sem_warmup = getattr(self.args, "sem_warmup", 10)
-        init_tau   = float(getattr(self.args, "tau", 0.07))
+        init_tau = float(getattr(self.args, "tau", 0.07))
 
         if not isinstance(sem_warmup, int) or sem_warmup < 0:
             raise ValueError(f"sem_warmup must be a non-negative integer, got {sem_warmup!r}")
@@ -209,7 +210,7 @@ class DetectionTrainer(BaseTrainer):
 
         fixed_sem, sem_mode = _resolve_weight("sem_weight")
         fixed_neg, neg_mode = _resolve_weight("neg_weight")
-        fixed_fp,  fp_mode  = _resolve_weight("fp_weight")
+        fixed_fp, fp_mode = _resolve_weight("fp_weight")
 
         LOGGER.info(
             f"Semantic loss weights — "
@@ -349,15 +350,15 @@ class DetectionTrainer(BaseTrainer):
         proj_head = unwrap_model(self.model).proj_head
         sem_params = unwrap_model(self.model).sem_params
         sem_align = getattr(proj_head, "_last_sem_align", float("nan"))
-        sem_sep   = getattr(proj_head, "_last_sem_sep",   float("nan"))
-        tau       = getattr(sem_params, "_last_tau",       float("nan")) if sem_params else float("nan")
+        sem_sep = getattr(proj_head, "_last_sem_sep", float("nan"))
+        tau = getattr(sem_params, "_last_tau", float("nan")) if sem_params else float("nan")
         sigma_sem = sem_params.log_sigma_sem.exp().item() if sem_params else float("nan")
         sigma_neg = sem_params.log_sigma_neg.exp().item() if sem_params else float("nan")
-        sigma_fp  = sem_params.log_sigma_fp.exp().item()  if sem_params else float("nan")
+        sigma_fp = sem_params.log_sigma_fp.exp().item() if sem_params else float("nan")
 
         csv_path = self.save_dir / "semantic_results.csv"
         header = "epoch,sem_align,sem_sep,tau,sigma_sem,sigma_neg,sigma_fp\n"
-        row    = f"{self.epoch},{sem_align:.5f},{sem_sep:.5f},{tau:.5f},{sigma_sem:.5f},{sigma_neg:.5f},{sigma_fp:.5f}\n"
+        row = f"{self.epoch},{sem_align:.5f},{sem_sep:.5f},{tau:.5f},{sigma_sem:.5f},{sigma_neg:.5f},{sigma_fp:.5f}\n"
         if not csv_path.exists():
             csv_path.write_text(header)
         with open(csv_path, "a") as f:
@@ -378,7 +379,7 @@ class DetectionTrainer(BaseTrainer):
         n = min(logits.shape[0], 32)
         sim = logits[:n, :n].float().numpy()
 
-        fig, ax = plt.subplots(figsize=(8, 7))
+        _fig, ax = plt.subplots(figsize=(8, 7))
         im = ax.imshow(sim, cmap="viridis", aspect="auto")
         plt.colorbar(im, ax=ax, label="Similarity score (before softmax)")
         ax.set_title(
@@ -409,12 +410,13 @@ class DetectionTrainer(BaseTrainer):
         """
         try:
             import numpy as np_local
+
             proj_head = unwrap_model(self.model).proj_head
             if proj_head is None or self.clip_encoder is None:
                 return
 
             self.model.eval()
-            vis_vecs, txt_vecs, cls_ids, comments_list = [], [], [], []
+            vis_vecs, txt_vecs, cls_ids, _comments_list = [], [], [], []
 
             with torch.no_grad():
                 for batch in self.test_loader:
@@ -422,8 +424,8 @@ class DetectionTrainer(BaseTrainer):
                     comment_embeds = batch.get("comment_embeds")
                     if comment_embeds is None:
                         continue
-                    preds  = self.model(batch["img"])
-                    feats  = preds["feats"]
+                    preds = self.model(batch["img"])
+                    feats = preds["feats"]
                     img_sz = batch["img"].shape[-1]
 
                     gt_boxes = batch["bboxes"].clone()
@@ -432,7 +434,7 @@ class DetectionTrainer(BaseTrainer):
                     gt_boxes[:, 2] = (batch["bboxes"][:, 0] + batch["bboxes"][:, 2] / 2) * img_sz
                     gt_boxes[:, 3] = (batch["bboxes"][:, 1] + batch["bboxes"][:, 3] / 2) * img_sz
                     gt_boxes = gt_boxes.clamp(0, img_sz).to(self.device)
-                    img_idx  = batch["batch_idx"].long().to(self.device)
+                    img_idx = batch["batch_idx"].long().to(self.device)
                     bw = gt_boxes[:, 2] - gt_boxes[:, 0]
                     bh = gt_boxes[:, 3] - gt_boxes[:, 1]
                     ok = (bw >= 2) & (bh >= 2) & (comment_embeds.to(self.device).norm(dim=-1) > 0)
@@ -440,49 +442,62 @@ class DetectionTrainer(BaseTrainer):
                         continue
 
                     from ultralytics.utils.semantic import roi_pool_neck_features
+
                     roi_f = roi_pool_neck_features(feats, gt_boxes[ok], img_idx[ok], img_sz)
-                    vis   = proj_head(roi_f.float())
-                    txt   = comment_embeds.to(self.device)[ok].float()
+                    vis = proj_head(roi_f.float())
+                    txt = comment_embeds.to(self.device)[ok].float()
                     vis_vecs.append(vis.cpu().numpy())
                     txt_vecs.append(txt.cpu().numpy())
                     cls_ids.extend(batch["cls"][ok].long().cpu().tolist())
-                    if len(vis_vecs) >= 5:   # enough batches for a meaningful plot
+                    if len(vis_vecs) >= 5:  # enough batches for a meaningful plot
                         break
 
             self.model.train()
             if not vis_vecs:
                 return
 
-            vis_all = np_local.concatenate(vis_vecs)   # (N, 512)
-            txt_all = np_local.concatenate(txt_vecs)   # (N, 512)
+            vis_all = np_local.concatenate(vis_vecs)  # (N, 512)
+            txt_all = np_local.concatenate(txt_vecs)  # (N, 512)
             combined = np_local.concatenate([vis_all, txt_all])  # (2N, 512)
             n = len(vis_all)
 
             try:
                 from sklearn.manifold import TSNE
-                coords = TSNE(n_components=2, perplexity=min(30, n - 1),
-                              random_state=42).fit_transform(combined)
+
+                coords = TSNE(n_components=2, perplexity=min(30, n - 1), random_state=42).fit_transform(combined)
             except ImportError:
                 from numpy.linalg import svd
+
                 _, _, Vt = svd(combined - combined.mean(0), full_matrices=False)
-                coords = combined @ Vt[:2].T   # PCA fallback
+                coords = combined @ Vt[:2].T  # PCA fallback
 
             vis_2d = coords[:n]
             txt_2d = coords[n:]
             colors = plt.cm.tab20(np_local.array(cls_ids) % 20)
 
-            fig, ax = plt.subplots(figsize=(10, 8))
+            _fig, ax = plt.subplots(figsize=(10, 8))
             for i in range(n):
-                ax.plot([vis_2d[i, 0], txt_2d[i, 0]],
-                        [vis_2d[i, 1], txt_2d[i, 1]],
-                        color=colors[i], alpha=0.3, linewidth=0.8)
-            ax.scatter(vis_2d[:, 0], vis_2d[:, 1], c=colors, marker="o",
-                       s=60, zorder=3, label="Visual features")
-            ax.scatter(txt_2d[:, 0], txt_2d[:, 1], c=colors, marker="D",
-                       s=60, zorder=3, edgecolors="black", linewidths=0.5, label="Text embeddings")
+                ax.plot(
+                    [vis_2d[i, 0], txt_2d[i, 0]],
+                    [vis_2d[i, 1], txt_2d[i, 1]],
+                    color=colors[i],
+                    alpha=0.3,
+                    linewidth=0.8,
+                )
+            ax.scatter(vis_2d[:, 0], vis_2d[:, 1], c=colors, marker="o", s=60, zorder=3, label="Visual features")
+            ax.scatter(
+                txt_2d[:, 0],
+                txt_2d[:, 1],
+                c=colors,
+                marker="D",
+                s=60,
+                zorder=3,
+                edgecolors="black",
+                linewidths=0.5,
+                label="Text embeddings",
+            )
             ax.set_title(
-                "Semantic Space — End of Training\n"
-                "Circles=visual  Diamonds=text  Lines=matched pairs  Colors=class"
+                "Semantic Space — End of Training\nCircles=visual  Diamonds=text  Lines=matched pairs  Colors=class"
             )
             ax.legend()
             plt.tight_layout()
