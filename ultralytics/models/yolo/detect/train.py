@@ -512,7 +512,7 @@ class DetectionTrainer(BaseTrainer):
     def final_eval(self):
         """Run standard final eval then save semantic plots and space visualization."""
         super().final_eval()
-        if RANK in {-1, 0}:
+        if RANK in {-1, 0} and not self._sem_disabled:
             self.plot_semantic_alignment(self.epoch)
             self.plot_semantic_space()
 
