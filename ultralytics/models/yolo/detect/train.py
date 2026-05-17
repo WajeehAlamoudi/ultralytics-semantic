@@ -165,10 +165,10 @@ class DetectionTrainer(BaseTrainer):
         if getattr(self.model, "end2end"):
             self.model.set_head_attr(max_det=self.args.max_det)
         sem_warmup = int(getattr(self.args, "sem_warmup", 10))
-        if sem_warmup == -2:
+        if sem_warmup == -1:
             self._sem_disabled = True
             self.args.sem_active = False
-            LOGGER.info("Semantic conditioning disabled (sem_warmup=-2) — pure YOLO training")
+            LOGGER.info("Semantic conditioning disabled (sem_warmup=-1) — pure YOLO training")
             return
 
         m = unwrap_model(self.model).model[-1]  # Detect module
@@ -190,7 +190,7 @@ class DetectionTrainer(BaseTrainer):
         # Validate and resolve semantic hyperparameters before training starts
         init_tau   = float(getattr(self.args, "tau", 0.07))
 
-        if not isinstance(sem_warmup, int) or (sem_warmup < 0 and sem_warmup != -2):
+        if not isinstance(sem_warmup, int) or (sem_warmup < 0 and sem_warmup != -1):
             raise ValueError(f"sem_warmup must be a non-negative integer, got {sem_warmup!r}")
         if sem_warmup >= self.args.epochs:
             raise ValueError(
