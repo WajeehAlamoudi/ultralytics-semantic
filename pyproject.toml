@@ -74,6 +74,9 @@ dependencies = [
     "psutil>=5.8.0", # system utilization
     "polars>=0.20.0",
     "ultralytics-thop>=2.0.18", # FLOPs computation https://github.com/ultralytics/thop
+    "clip @ git+https://github.com/openai/CLIP.git", # semantic conditioning
+    "ftfy",   # CLIP dependency
+    "regex",  # CLIP dependency
 ]
 
 # Optional dependencies ------------------------------------------------------------------------------------------------
@@ -102,6 +105,11 @@ export = [
     "h5py!=3.11.0; platform_machine == 'aarch64'", # fix h5py build issues due to missing aarch64 wheels in 3.11 release
     "setuptools<=81.0.0",  # pin due to >=82.0.0 breaking tensorflow.js package
     "packaging>=26.0; platform_machine == 'aarch64' and platform_system == 'Linux' and python_version >= '3.9'", # IMX export bug
+]
+semantic = [
+    # OpenAI CLIP — install manually: pip install git+https://github.com/openai/CLIP.git
+    "ftfy",   # CLIP text tokenizer dependency
+    "regex",  # CLIP text tokenizer dependency
 ]
 solutions = [
     "shapely>=2.0.0",    # shapely for point and polygon data matching

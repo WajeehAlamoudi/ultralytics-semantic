@@ -197,7 +197,7 @@ def verify_image_label(args: tuple) -> list:
     """Verify one image-label pair."""
     im_file, lb_file, prefix, keypoint, num_cls, nkpt, ndim, single_cls = args
     # Number (missing, found, empty, corrupt), message, segments, keypoints
-    nm, nf, ne, nc, msg, segments, keypoints = 0, 0, 0, 0, "", [], None
+    nm, nf, ne, nc, msg, segments, keypoints, comments, image_comment = 0, 0, 0, 0, "", [], None, [], ""
     try:
         # Verify images
         im = Image.open(im_file)
@@ -217,7 +217,18 @@ def verify_image_label(args: tuple) -> list:
         if os.path.isfile(lb_file):
             nf = 1  # label found
             with open(lb_file, encoding="utf-8") as f:
-                lb = [x.split() for x in f.read().strip().splitlines() if len(x)]
+                lines = [x for x in f.read().strip().splitlines() if len(x)]
+                lb_raw = [x.split("#", 1)[0].strip().split() for x in lines]
+                keep = [len(x) > 0 for x in lb_raw]
+                image_comment = " ".join(
+                    x.split("#", 1)[1].strip() for x, k in zip(lines, keep)
+                    if not k and "#" in x
+                )
+                comments = [
+                    x.split("#", 1)[1].strip() if "#" in x else ""
+                    for x, k in zip(lines, keep) if k
+                ]
+                lb = [x for x, k in zip(lb_raw, keep) if k]
                 if any(len(x) > 6 for x in lb) and (not keypoint):  # is segment
                     classes = np.array([x[0] for x in lb], dtype=np.float32)
                     segments = [np.array(x[1:], dtype=np.float32).reshape(-1, 2) for x in lb]  # (cls, xy1...)
@@ -243,6 +254,7 @@ def verify_image_label(args: tuple) -> list:
                 _, i = np.unique(lb, axis=0, return_index=True)
                 if len(i) < nl:  # duplicate row check
                     lb = lb[i]  # remove duplicates
+                    comments = [comments[x] for x in i]
                     if segments:
                         segments = [segments[x] for x in i]
                     msg = f"{prefix}{im_file}: {nl - len(i)} duplicate labels removed"
@@ -258,12 +270,11 @@ def verify_image_label(args: tuple) -> list:
                 kpt_mask = np.where((keypoints[..., 0] < 0) | (keypoints[..., 1] < 0), 0.0, 1.0).astype(np.float32)
                 keypoints = np.concatenate([keypoints, kpt_mask[..., None]], axis=-1)  # (nl, nkpt, 3)
         lb = lb[:, :5]
-        return im_file, lb, shape, segments, keypoints, nm, nf, ne, nc, msg
+        return im_file, lb, shape, segments, keypoints, nm, nf, ne, nc, msg, comments, image_comment
     except Exception as e:
         nc = 1
         msg = f"{prefix}{im_file}: ignoring corrupt image/label: {e}"
-        return [None, None, None, None, None, nm, nf, ne, nc, msg]
-
+        return [None, None, None, None, None, nm, nf, ne, nc, msg, [], ""]
 
 def visualize_image_annotations(image_path: str, txt_path: str, label_map: dict[int, str]):
     """Visualize YOLO annotations (bounding boxes and class labels) on an image.

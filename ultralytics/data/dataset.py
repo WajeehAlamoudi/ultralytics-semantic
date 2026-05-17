@@ -43,7 +43,7 @@ from .utils import (
 )
 
 # Ultralytics dataset *.cache version, >= 1.0.0 for Ultralytics YOLO models
-DATASET_CACHE_VERSION = "1.0.3"
+DATASET_CACHE_VERSION = "1.0.4"
 
 
 class YOLODataset(BaseDataset):
@@ -121,7 +121,7 @@ class YOLODataset(BaseDataset):
                 ),
             )
             pbar = TQDM(results, desc=desc, total=total)
-            for im_file, lb, shape, segments, keypoint, nm_f, nf_f, ne_f, nc_f, msg in pbar:
+            for im_file, lb, shape, segments, keypoint, nm_f, nf_f, ne_f, nc_f, msg, comments,image_comment in pbar:
                 nm += nm_f
                 nf += nf_f
                 ne += ne_f
@@ -137,6 +137,9 @@ class YOLODataset(BaseDataset):
                             "keypoints": keypoint,
                             "normalized": True,
                             "bbox_format": "xywh",
+                            "comments": comments,
+                            "image_comment": image_comment,
+                            "is_negative": len(lb) == 0,
                         }
                     )
                 if msg:
@@ -298,6 +301,12 @@ class YOLODataset(BaseDataset):
                 value = torch.stack(value, 0)
             elif k == "visuals":
                 value = torch.nn.utils.rnn.pad_sequence(value, batch_first=True)
+            elif k == "comments":
+                value = [c for sample in value for c in sample]
+            elif k == "image_comment":
+                value = list(value)
+            elif k == "is_negative":
+                value = list(value)
             if k in {"masks", "keypoints", "bboxes", "cls", "segments", "obb"}:
                 value = torch.cat(value, 0)
             new_batch[k] = value

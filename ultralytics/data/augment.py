@@ -697,10 +697,12 @@ class Mosaic(BaseMixTransform):
             return {}
         cls = []
         instances = []
+        all_comments = []
         imgsz = self.imgsz * 2  # mosaic imgsz
         for labels in mosaic_labels:
             cls.append(labels["cls"])
             instances.append(labels["instances"])
+            all_comments.extend(labels.get("comments", [""] * len(labels["cls"])))
         # Final labels
         final_labels = {
             "im_file": mosaic_labels[0]["im_file"],
@@ -713,6 +715,9 @@ class Mosaic(BaseMixTransform):
         final_labels["instances"].clip(imgsz, imgsz)
         good = final_labels["instances"].remove_zero_area_boxes()
         final_labels["cls"] = final_labels["cls"][good]
+        final_labels["comments"] = [c for c, g in zip(all_comments, good) if g]
+        final_labels["image_comment"] = mosaic_labels[0].get("image_comment", "")
+        final_labels["is_negative"] = len(final_labels["cls"]) == 0
         if "texts" in mosaic_labels[0]:
             final_labels["texts"] = mosaic_labels[0]["texts"]
         return final_labels
@@ -795,6 +800,8 @@ class MixUp(BaseMixTransform):
         labels2 = labels["mix_labels"][0]
         labels["instances"] = Instances.concatenate([labels["instances"], labels2["instances"]], axis=0)
         labels["cls"] = np.concatenate([labels["cls"], labels2["cls"]], 0)
+        labels["comments"] = labels.get("comments", []) + labels2.get("comments", [])
+        labels["is_negative"] = len(labels["cls"]) == 0
         return labels
 
 
@@ -945,6 +952,9 @@ class CutMix(BaseMixTransform):
 
         labels["cls"] = np.concatenate([labels["cls"], labels2["cls"][indexes2]], axis=0)
         labels["instances"] = Instances.concatenate([labels["instances"], instances2], axis=0)
+        labels2_comments = labels2.get("comments", [""] * len(labels2["cls"]))
+        labels["comments"] = labels.get("comments", []) + [labels2_comments[i] for i in indexes2]
+        labels["is_negative"] = len(labels["cls"]) == 0
         return labels
 
 
@@ -1138,6 +1148,8 @@ class RandomPerspective(BaseTransform):
         )
         labels["instances"] = new_instances[i]
         labels["cls"] = cls[i]
+        if "comments" in labels:
+            labels["comments"] = [c for c, keep in zip(labels["comments"], i) if keep]
         return labels
 
     def apply_bboxes(self, bboxes: np.ndarray, M: np.ndarray) -> np.ndarray:
@@ -1876,13 +1888,18 @@ class CopyPaste(BaseMixTransform):
         selected = params["selected"]
         cls = labels["cls"]
         labels2_cls = params.get("labels2_cls")
+        src_comments = labels.get("comments", [""] * len(labels["cls"]))
+        comments = list(labels.get("comments", []))
 
         for j in selected:
             cls = np.concatenate((cls, (labels2_cls if labels2_cls is not None else cls)[[j]]), axis=0)
             instances = Instances.concatenate((instances, instances2[[j]]), axis=0)
+            comments.append(src_comments[j] if j < len(src_comments) else "")
 
         labels["cls"] = cls
         labels["instances"] = instances
+        labels["comments"] = comments
+        labels["is_negative"] = len(cls) == 0
         return labels
 
 

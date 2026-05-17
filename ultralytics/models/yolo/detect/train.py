@@ -7,6 +7,9 @@ import random
 from copy import copy
 from typing import Any
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
@@ -19,6 +22,7 @@ from ultralytics.utils import DEFAULT_CFG, LOGGER, RANK
 from ultralytics.utils.patches import override_configs
 from ultralytics.utils.plotting import plot_images, plot_labels
 from ultralytics.utils.torch_utils import torch_distributed_zero_first, unwrap_model
+from ultralytics.utils.semantic import CLIPTextEncoder, SemanticLossParams, SemanticProjectionHead
 
 
 class DetectionTrainer(BaseTrainer):
@@ -61,6 +65,9 @@ class DetectionTrainer(BaseTrainer):
             _callbacks (dict, optional): Dictionary of callback functions to be executed during training.
         """
         super().__init__(cfg, overrides, _callbacks)
+        self.clip_encoder = None
+        self.add_callback("on_fit_epoch_end", self._maybe_plot_semantic)
+        self.add_callback("on_fit_epoch_end", self._update_semantic_weights)
 
     def build_dataset(self, img_path: str, mode: str = "train", batch: int | None = None):
         """Build YOLO Dataset for training or validation.
@@ -134,6 +141,14 @@ class DetectionTrainer(BaseTrainer):
                 ]  # new shape (stretched to gs-multiple)
                 imgs = nn.functional.interpolate(imgs, size=ns, mode="bilinear", align_corners=False)
             batch["img"] = imgs
+
+        if self.clip_encoder is None:
+            self.clip_encoder = CLIPTextEncoder(device=self.device)
+        if batch.get("comments"):
+            batch["comment_embeds"] = self.clip_encoder.encode(batch["comments"])
+        if batch.get("image_comment"):
+            batch["image_comment_embeds"] = self.clip_encoder.encode(batch["image_comment"])
+
         return batch
 
     def set_model_attributes(self):
@@ -147,6 +162,70 @@ class DetectionTrainer(BaseTrainer):
         self.model.args = self.args  # attach hyperparameters to model
         if getattr(self.model, "end2end"):
             self.model.set_head_attr(max_det=self.args.max_det)
+        m = unwrap_model(self.model).model[-1]  # Detect module
+        # Sum of neck feature channels across all FPN scales (e.g. 128+256+512=896 for yolo11n)
+        # cv2[i][0] is the first Conv in each scale's box branch — confirmed safe for all standard
+        # Detect-based heads (v3–v12, v10Detect, OBB, Pose, Segment). RTDETRDecoder not supported.
+        try:
+            feat_dim = sum(m.cv2[i][0].conv.in_channels for i in range(m.nl))
+        except (AttributeError, IndexError):
+            LOGGER.warning(
+                "SemanticProjectionHead: could not infer neck channel dimensions from detection head. "
+                "Supported models: YOLOv3, v5, v8, v9, v10, v11, v12, v26, and their variants (OBB, Pose, Segment). "
+                "Unsupported: RTDETRDecoder and custom heads without standard cv2 branch. "
+                f"Falling back to feat_dim=256*nl={256 * m.nl}."
+            )
+            feat_dim = 256 * m.nl
+        unwrap_model(self.model).proj_head = SemanticProjectionHead(feat_dim, embed_dim=512).to(self.device)
+
+        # Validate and resolve semantic hyperparameters before training starts
+        sem_warmup = getattr(self.args, "sem_warmup", 10)
+        init_tau   = float(getattr(self.args, "tau", 0.07))
+
+        if not isinstance(sem_warmup, int) or sem_warmup < 0:
+            raise ValueError(f"sem_warmup must be a non-negative integer, got {sem_warmup!r}")
+        if sem_warmup >= self.args.epochs:
+            raise ValueError(
+                f"sem_warmup={sem_warmup} must be less than epochs={self.args.epochs} — "
+                "semantic losses would never activate"
+            )
+        if not (0.01 <= init_tau <= 1.0):
+            raise ValueError(
+                f"tau={init_tau} is out of range. Valid range: [0.01, 1.0]. "
+                "Typical values: 0.07 (CLIP default, sharp) — 0.5 (soft, good for early training)"
+            )
+
+        def _resolve_weight(name):
+            """Return (float, mode_str) — float or None if auto."""
+            val = getattr(self.args, name, None)
+            if val is None:
+                return None, "auto"
+            val = float(val)
+            if val < 0:
+                raise ValueError(f"{name}={val} must be >= 0")
+            if val == 0:
+                LOGGER.warning(f"{name}=0 will completely silence that loss component")
+            return val, f"{val}"
+
+        fixed_sem, sem_mode = _resolve_weight("sem_weight")
+        fixed_neg, neg_mode = _resolve_weight("neg_weight")
+        fixed_fp,  fp_mode  = _resolve_weight("fp_weight")
+
+        LOGGER.info(
+            f"Semantic loss weights — "
+            f"sem_weight: {sem_mode}  |  "
+            f"neg_weight: {neg_mode}  |  "
+            f"fp_weight: {fp_mode}  |  "
+            f"tau: {init_tau} (initial, then learned)  |  "
+            f"sem_warmup: {sem_warmup} epochs"
+        )
+
+        unwrap_model(self.model).sem_params = SemanticLossParams(
+            init_tau=init_tau,
+            fixed_sem=fixed_sem,
+            fixed_neg=fixed_neg,
+            fixed_fp=fixed_fp,
+        ).to(self.device)
 
     def set_class_weights(self):
         """Compute and set class weights for handling class imbalance.
@@ -185,7 +264,7 @@ class DetectionTrainer(BaseTrainer):
 
     def get_validator(self):
         """Return a DetectionValidator for YOLO model validation."""
-        self.loss_names = "box_loss", "cls_loss", "dfl_loss"
+        self.loss_names = "box_loss", "cls_loss", "dfl_loss", "sem_loss", "neg_loss", "fp_loss"
         return yolo.detect.DetectionValidator(
             self.test_loader, save_dir=self.save_dir, args=copy(self.args), _callbacks=self.callbacks
         )
@@ -236,6 +315,193 @@ class DetectionTrainer(BaseTrainer):
         boxes = np.concatenate([lb["bboxes"] for lb in self.train_loader.dataset.labels], 0)
         cls = np.concatenate([lb["cls"] for lb in self.train_loader.dataset.labels], 0)
         plot_labels(boxes, cls.squeeze(), names=self.data["names"], save_dir=self.save_dir, on_plot=self.on_plot)
+
+    def _update_semantic_weights(self, trainer=None):
+        """Control semantic loss activation via warmup gate.
+
+        Before sem_warmup epochs → sem_active=False  (sem + neg losses silent, model learns boxes freely)
+        After  sem_warmup epochs → sem_active=True   (optimizer takes full control of all weights via
+                                                       SemanticLossParams learned uncertainty weighting)
+
+        fp_loss is always active from epoch 0 — false positive suppression on negative images
+        starts immediately regardless of warmup.
+
+        Hyperparameters:
+            sem_warmup (int, default 10): epochs before semantic losses activate
+            tau        (float, default 0.07): initial InfoNCE temperature (then learned by optimizer)
+        """
+        warmup = int(getattr(self.args, "sem_warmup", 10))
+        was_active = getattr(self.args, "sem_active", False)
+        self.args.sem_active = self.epoch >= warmup
+        if self.args.sem_active and not was_active:
+            LOGGER.info(f"Epoch {self.epoch}: semantic losses activated — optimizer now controls all weights")
+
+    def _maybe_plot_semantic(self, trainer=None):
+        """Called every epoch end — log semantic metrics to CSV and plot heatmap every 10 epochs."""
+        if RANK not in {-1, 0}:
+            return
+        self._log_semantic_metrics()
+        if self.epoch % 10 == 0 or self.epoch == self.epochs - 1:
+            self.plot_semantic_alignment(self.epoch)
+
+    def _log_semantic_metrics(self):
+        """Append one row of semantic metrics to semantic_results.csv."""
+        proj_head = unwrap_model(self.model).proj_head
+        sem_params = unwrap_model(self.model).sem_params
+        sem_align = getattr(proj_head, "_last_sem_align", float("nan"))
+        sem_sep   = getattr(proj_head, "_last_sem_sep",   float("nan"))
+        tau       = getattr(sem_params, "_last_tau",       float("nan")) if sem_params else float("nan")
+        sigma_sem = sem_params.log_sigma_sem.exp().item() if sem_params else float("nan")
+        sigma_neg = sem_params.log_sigma_neg.exp().item() if sem_params else float("nan")
+        sigma_fp  = sem_params.log_sigma_fp.exp().item()  if sem_params else float("nan")
+
+        csv_path = self.save_dir / "semantic_results.csv"
+        header = "epoch,sem_align,sem_sep,tau,sigma_sem,sigma_neg,sigma_fp\n"
+        row    = f"{self.epoch},{sem_align:.5f},{sem_sep:.5f},{tau:.5f},{sigma_sem:.5f},{sigma_neg:.5f},{sigma_fp:.5f}\n"
+        if not csv_path.exists():
+            csv_path.write_text(header)
+        with open(csv_path, "a") as f:
+            f.write(row)
+
+    def plot_semantic_alignment(self, epoch: int) -> None:
+        """Save a heatmap of the InfoNCE similarity matrix from the last training batch.
+
+        The matrix rows = visual anchor projections, cols = CLIP text embeddings.
+        A bright diagonal means the model correctly discriminates between descriptions.
+        Saved to: runs/detect/train/semantic_epoch{N}.png
+        """
+        proj_head = unwrap_model(self.model).proj_head
+        logits = getattr(proj_head, "_last_sem_logits", None)
+        if logits is None:
+            return
+
+        n = min(logits.shape[0], 32)
+        sim = logits[:n, :n].float().numpy()
+
+        fig, ax = plt.subplots(figsize=(8, 7))
+        im = ax.imshow(sim, cmap="viridis", aspect="auto")
+        plt.colorbar(im, ax=ax, label="Similarity score (before softmax)")
+        ax.set_title(
+            f"Semantic Similarity Matrix — Epoch {epoch}\n"
+            "Bright diagonal = visual features aligned with their text descriptions"
+        )
+        ax.set_xlabel("Text embeddings (comment index)")
+        ax.set_ylabel("Visual embeddings (anchor index)")
+        plt.tight_layout()
+        fname = self.save_dir / f"semantic_epoch{epoch}.png"
+        plt.savefig(fname, dpi=150)
+        plt.close()
+        LOGGER.info(f"Semantic alignment plot → {fname}")
+
+    def plot_semantic_space(self) -> None:
+        """Generate t-SNE plot of semantic space at end of training.
+
+        Runs one validation batch through the model, collects ROI-pooled visual
+        features and their matched CLIP text embeddings, projects both into 512-dim
+        space, then plots them together in 2D using t-SNE (falls back to PCA if
+        sklearn is unavailable).
+
+        Circles  = visual features (colored by class index)
+        Diamonds = CLIP text embeddings (same color as their matched visual feature)
+        Lines    = connect each visual feature to its matched text embedding
+
+        Saved to: runs/detect/train/semantic_space.png
+        """
+        try:
+            import numpy as np_local
+            proj_head = unwrap_model(self.model).proj_head
+            if proj_head is None or self.clip_encoder is None:
+                return
+
+            self.model.eval()
+            vis_vecs, txt_vecs, cls_ids, comments_list = [], [], [], []
+
+            with torch.no_grad():
+                for batch in self.test_loader:
+                    batch = self.preprocess_batch(batch)
+                    comment_embeds = batch.get("comment_embeds")
+                    if comment_embeds is None:
+                        continue
+                    preds  = self.model(batch["img"])
+                    feats  = preds["feats"]
+                    img_sz = batch["img"].shape[-1]
+
+                    gt_boxes = batch["bboxes"].clone()
+                    gt_boxes[:, 0] = (batch["bboxes"][:, 0] - batch["bboxes"][:, 2] / 2) * img_sz
+                    gt_boxes[:, 1] = (batch["bboxes"][:, 1] - batch["bboxes"][:, 3] / 2) * img_sz
+                    gt_boxes[:, 2] = (batch["bboxes"][:, 0] + batch["bboxes"][:, 2] / 2) * img_sz
+                    gt_boxes[:, 3] = (batch["bboxes"][:, 1] + batch["bboxes"][:, 3] / 2) * img_sz
+                    gt_boxes = gt_boxes.clamp(0, img_sz).to(self.device)
+                    img_idx  = batch["batch_idx"].long().to(self.device)
+                    bw = gt_boxes[:, 2] - gt_boxes[:, 0]
+                    bh = gt_boxes[:, 3] - gt_boxes[:, 1]
+                    ok = (bw >= 2) & (bh >= 2) & (comment_embeds.to(self.device).norm(dim=-1) > 0)
+                    if ok.sum() < 2:
+                        continue
+
+                    from ultralytics.utils.semantic import roi_pool_neck_features
+                    roi_f = roi_pool_neck_features(feats, gt_boxes[ok], img_idx[ok], img_sz)
+                    vis   = proj_head(roi_f.float())
+                    txt   = comment_embeds.to(self.device)[ok].float()
+                    vis_vecs.append(vis.cpu().numpy())
+                    txt_vecs.append(txt.cpu().numpy())
+                    cls_ids.extend(batch["cls"][ok].long().cpu().tolist())
+                    if len(vis_vecs) >= 5:   # enough batches for a meaningful plot
+                        break
+
+            self.model.train()
+            if not vis_vecs:
+                return
+
+            vis_all = np_local.concatenate(vis_vecs)   # (N, 512)
+            txt_all = np_local.concatenate(txt_vecs)   # (N, 512)
+            combined = np_local.concatenate([vis_all, txt_all])  # (2N, 512)
+            n = len(vis_all)
+
+            try:
+                from sklearn.manifold import TSNE
+                coords = TSNE(n_components=2, perplexity=min(30, n - 1),
+                              random_state=42).fit_transform(combined)
+            except ImportError:
+                from numpy.linalg import svd
+                _, _, Vt = svd(combined - combined.mean(0), full_matrices=False)
+                coords = combined @ Vt[:2].T   # PCA fallback
+
+            vis_2d = coords[:n]
+            txt_2d = coords[n:]
+            colors = plt.cm.tab20(np_local.array(cls_ids) % 20)
+
+            fig, ax = plt.subplots(figsize=(10, 8))
+            for i in range(n):
+                ax.plot([vis_2d[i, 0], txt_2d[i, 0]],
+                        [vis_2d[i, 1], txt_2d[i, 1]],
+                        color=colors[i], alpha=0.3, linewidth=0.8)
+            ax.scatter(vis_2d[:, 0], vis_2d[:, 1], c=colors, marker="o",
+                       s=60, zorder=3, label="Visual features")
+            ax.scatter(txt_2d[:, 0], txt_2d[:, 1], c=colors, marker="D",
+                       s=60, zorder=3, edgecolors="black", linewidths=0.5, label="Text embeddings")
+            ax.set_title(
+                "Semantic Space — End of Training\n"
+                "Circles=visual  Diamonds=text  Lines=matched pairs  Colors=class"
+            )
+            ax.legend()
+            plt.tight_layout()
+            fname = self.save_dir / "semantic_space.png"
+            plt.savefig(fname, dpi=150)
+            plt.close()
+            LOGGER.info(f"Semantic space plot → {fname}")
+
+        except Exception as e:
+            LOGGER.warning(f"Semantic space plot failed: {e}")
+        finally:
+            self.model.train()
+
+    def final_eval(self):
+        """Run standard final eval then save semantic plots and space visualization."""
+        super().final_eval()
+        if RANK in {-1, 0}:
+            self.plot_semantic_alignment(self.epoch)
+            self.plot_semantic_space()
 
     def auto_batch(self):
         """Get optimal batch size by calculating memory occupation of model.

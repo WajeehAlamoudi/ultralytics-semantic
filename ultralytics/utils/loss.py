@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from ultralytics.utils.metrics import OKS_SIGMA, RLE_WEIGHT
 from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh
 from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, dist2bbox, dist2rbox, make_anchors
+from ultralytics.utils.semantic import roi_pool_neck_features
 from ultralytics.utils.torch_utils import autocast
 
 from .metrics import bbox_iou, probiou
@@ -364,6 +365,9 @@ class v8DetectionLoss:
         )
         self.bbox_loss = BboxLoss(m.reg_max).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
+        self.proj_head  = getattr(model, "proj_head", None)
+        self.sem_params = getattr(model, "sem_params", None)  # SemanticLossParams (learnable)
+        self.model_args = model.args                           # live reference — sem_active updated each epoch
 
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor) -> torch.Tensor:
         """Preprocess targets by converting to tensor format and scaling coordinates."""
@@ -396,7 +400,7 @@ class v8DetectionLoss:
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size and return foreground mask and
         target indices.
         """
-        loss = torch.zeros(3, device=self.device)  # box, cls, dfl
+        loss = torch.zeros(6, device=self.device)  # box, cls, dfl, sem, neg, fp
         pred_distri, pred_scores = (
             preds["boxes"].permute(0, 2, 1).contiguous(),
             preds["scores"].permute(0, 2, 1).contiguous(),
@@ -450,11 +454,88 @@ class v8DetectionLoss:
         loss[0] *= self.hyp.box  # box gain
         loss[1] *= self.hyp.cls  # cls gain
         loss[2] *= self.hyp.dfl  # dfl gain
+
+        if self.proj_head is not None:
+            feats    = preds["feats"]                          # [P3, P4, P5] neck feature maps
+            img_size = batch["img"].shape[-1]                  # input image size (square assumed)
+            sp         = self.sem_params                         # SemanticLossParams (may be None)
+            tau        = sp.tau if sp is not None else torch.tensor(0.07, device=self.device)
+            sem_active = getattr(self.model_args, "sem_active", True)  # False during warmup
+
+            # Semantic loss — ROI-pool neck features per GT box, then InfoNCE
+            comment_embeds = batch.get("comment_embeds")
+            if comment_embeds is not None and sem_active:
+                gt_boxes_xyxy = batch["bboxes"].clone()     # (N_gt, 4) normalized xywh
+                # convert normalized xywh → pixel xyxy
+                gt_boxes_xyxy[:, 0] = (batch["bboxes"][:, 0] - batch["bboxes"][:, 2] / 2) * img_size
+                gt_boxes_xyxy[:, 1] = (batch["bboxes"][:, 1] - batch["bboxes"][:, 3] / 2) * img_size
+                gt_boxes_xyxy[:, 2] = (batch["bboxes"][:, 0] + batch["bboxes"][:, 2] / 2) * img_size
+                gt_boxes_xyxy[:, 3] = (batch["bboxes"][:, 1] + batch["bboxes"][:, 3] / 2) * img_size
+                gt_boxes_xyxy = gt_boxes_xyxy.clamp(0, img_size).to(self.device)
+                img_idx = batch["batch_idx"].long().to(self.device)
+
+                # Filter degenerate and tiny boxes — same 2-pixel rule used by standard YOLO OBB loss
+                bw = gt_boxes_xyxy[:, 2] - gt_boxes_xyxy[:, 0]
+                bh = gt_boxes_xyxy[:, 3] - gt_boxes_xyxy[:, 1]
+                size_ok = (bw >= 2) & (bh >= 2)
+                gt_boxes_xyxy = gt_boxes_xyxy[size_ok]
+                img_idx = img_idx[size_ok]
+
+                # ROI pool: one feature vector per GT box from neck feature maps
+                roi_feats = roi_pool_neck_features(feats, gt_boxes_xyxy, img_idx, img_size)  # (N_gt, C)
+                text_embeds = comment_embeds.to(self.device)[size_ok]                         # (N_gt, 512)
+                valid = text_embeds.norm(dim=-1) > 0                                          # boxes with comments
+                if valid.sum() > 1:
+                    vis = self.proj_head(roi_feats[valid].to(pred_scores.dtype))  # (N, 512)
+                    txt = text_embeds[valid].to(vis.dtype)                         # (N, 512)
+                    logits = (vis @ txt.T) / tau                                   # (N, N)
+                    labels = torch.arange(vis.shape[0], device=self.device)
+                    loss[3] = (F.cross_entropy(logits, labels) +
+                               F.cross_entropy(logits.T, labels)) / 2
+                    # store metrics for logging and visualization
+                    sim = (vis @ txt.T).detach()                                   # cosine sim (no tau)
+                    n = sim.shape[0]
+                    diag_mask = torch.eye(n, dtype=torch.bool, device=self.device)
+                    self.proj_head._last_sem_logits = logits.detach().cpu()
+                    self.proj_head._last_sem_align  = sim[diag_mask].mean().item()
+                    self.proj_head._last_sem_sep    = sim[~diag_mask].mean().item()
+                    if sp is not None:
+                        sp._last_tau = tau.item()
+
+            # Negative sample loss — global avg pool of neck features per negative image, InfoNCE
+            image_comment_embeds = batch.get("image_comment_embeds")
+            if image_comment_embeds is not None and sem_active:
+                is_negative = torch.tensor(batch["is_negative"], device=self.device)
+                neg_valid = is_negative & (image_comment_embeds.to(self.device).norm(dim=-1) > 0)
+                if neg_valid.sum() > 1:
+                    # global average pool all neck scales → one vector per image
+                    img_feat = torch.cat(
+                        [f.mean(dim=[-2, -1]) for f in feats], dim=1
+                    )[neg_valid].to(pred_scores.dtype)                             # (M, C)
+                    img_proj = self.proj_head(img_feat)                            # (M, 512)
+                    txt_neg = image_comment_embeds.to(self.device)[neg_valid].to(img_proj.dtype)
+                    logits_neg = (img_proj @ txt_neg.T) / tau
+                    labels_neg = torch.arange(img_proj.shape[0], device=self.device)
+                    loss[4] = (F.cross_entropy(logits_neg, labels_neg) +
+                               F.cross_entropy(logits_neg.T, labels_neg)) / 2
+
+            # False positive penalty — penalize any detection confidence on negative images
+            is_negative_mask = torch.tensor(batch.get("is_negative", [False] * batch_size),
+                                            dtype=torch.bool, device=self.device)
+            if is_negative_mask.sum() > 0:
+                neg_scores = pred_scores[is_negative_mask].sigmoid()  # (num_neg, anchors, nc)
+                loss[5] = neg_scores.max(dim=-1).values.mean()        # mean max-class score
+
+            if sp is not None:
+                loss[3] = sp.weight(loss[3], sp.log_sigma_sem, sp.fixed_sem)
+                loss[4] = sp.weight(loss[4], sp.log_sigma_neg, sp.fixed_neg)
+                loss[5] = sp.weight(loss[5], sp.log_sigma_fp,  sp.fixed_fp)
+
         return (
             (fg_mask, target_gt_idx, target_bboxes, anchor_points, stride_tensor),
             loss,
             loss.detach(),
-        )  # loss(box, cls, dfl)
+        )  # loss(box, cls, dfl, sem, neg, fp)
 
     def parse_output(
         self, preds: dict[str, torch.Tensor] | tuple[torch.Tensor, dict[str, torch.Tensor]]
