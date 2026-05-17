@@ -66,6 +66,7 @@ class DetectionTrainer(BaseTrainer):
         """
         super().__init__(cfg, overrides, _callbacks)
         self.clip_encoder = None
+        self._sem_disabled = False  # set True when sem_warmup=-2
         self.add_callback("on_fit_epoch_end", self._maybe_plot_semantic)
         self.add_callback("on_fit_epoch_end", self._update_semantic_weights)
 
@@ -142,12 +143,13 @@ class DetectionTrainer(BaseTrainer):
                 imgs = nn.functional.interpolate(imgs, size=ns, mode="bilinear", align_corners=False)
             batch["img"] = imgs
 
-        if self.clip_encoder is None:
-            self.clip_encoder = CLIPTextEncoder(device=self.device)
-        if batch.get("comments"):
-            batch["comment_embeds"] = self.clip_encoder.encode(batch["comments"])
-        if batch.get("image_comment"):
-            batch["image_comment_embeds"] = self.clip_encoder.encode(batch["image_comment"])
+        if not self._sem_disabled:
+            if self.clip_encoder is None:
+                self.clip_encoder = CLIPTextEncoder(device=self.device)
+            if batch.get("comments"):
+                batch["comment_embeds"] = self.clip_encoder.encode(batch["comments"])
+            if batch.get("image_comment"):
+                batch["image_comment_embeds"] = self.clip_encoder.encode(batch["image_comment"])
 
         return batch
 
@@ -162,6 +164,13 @@ class DetectionTrainer(BaseTrainer):
         self.model.args = self.args  # attach hyperparameters to model
         if getattr(self.model, "end2end"):
             self.model.set_head_attr(max_det=self.args.max_det)
+        sem_warmup = int(getattr(self.args, "sem_warmup", 10))
+        if sem_warmup == -2:
+            self._sem_disabled = True
+            self.args.sem_active = False
+            LOGGER.info("Semantic conditioning disabled (sem_warmup=-2) — pure YOLO training")
+            return
+
         m = unwrap_model(self.model).model[-1]  # Detect module
         # Sum of neck feature channels across all FPN scales (e.g. 128+256+512=896 for yolo11n)
         # cv2[i][0] is the first Conv in each scale's box branch — confirmed safe for all standard
@@ -179,10 +188,9 @@ class DetectionTrainer(BaseTrainer):
         unwrap_model(self.model).proj_head = SemanticProjectionHead(feat_dim, embed_dim=512).to(self.device)
 
         # Validate and resolve semantic hyperparameters before training starts
-        sem_warmup = getattr(self.args, "sem_warmup", 10)
         init_tau   = float(getattr(self.args, "tau", 0.07))
 
-        if not isinstance(sem_warmup, int) or sem_warmup < 0:
+        if not isinstance(sem_warmup, int) or (sem_warmup < 0 and sem_warmup != -2):
             raise ValueError(f"sem_warmup must be a non-negative integer, got {sem_warmup!r}")
         if sem_warmup >= self.args.epochs:
             raise ValueError(
@@ -264,7 +272,10 @@ class DetectionTrainer(BaseTrainer):
 
     def get_validator(self):
         """Return a DetectionValidator for YOLO model validation."""
-        self.loss_names = "box_loss", "cls_loss", "dfl_loss", "sem_loss", "neg_loss", "fp_loss"
+        if self._sem_disabled:
+            self.loss_names = "box_loss", "cls_loss", "dfl_loss"
+        else:
+            self.loss_names = "box_loss", "cls_loss", "dfl_loss", "sem_loss", "neg_loss", "fp_loss"
         return yolo.detect.DetectionValidator(
             self.test_loader, save_dir=self.save_dir, args=copy(self.args), _callbacks=self.callbacks
         )
@@ -330,6 +341,8 @@ class DetectionTrainer(BaseTrainer):
             sem_warmup (int, default 10): epochs before semantic losses activate
             tau        (float, default 0.07): initial InfoNCE temperature (then learned by optimizer)
         """
+        if self._sem_disabled:
+            return
         warmup = int(getattr(self.args, "sem_warmup", 10))
         was_active = getattr(self.args, "sem_active", False)
         self.args.sem_active = self.epoch >= warmup
@@ -338,7 +351,7 @@ class DetectionTrainer(BaseTrainer):
 
     def _maybe_plot_semantic(self, trainer=None):
         """Called every epoch end — log semantic metrics to CSV and plot heatmap every 10 epochs."""
-        if RANK not in {-1, 0}:
+        if RANK not in {-1, 0} or self._sem_disabled:
             return
         self._log_semantic_metrics()
         if self.epoch % 10 == 0 or self.epoch == self.epochs - 1:
