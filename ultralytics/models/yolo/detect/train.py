@@ -199,7 +199,7 @@ class DetectionTrainer(BaseTrainer):
                 _orig_fwd = _layer.forward
                 def _make_cp(_layer, _f):
                     def _cp(x):
-                        if _layer.training:
+                        if _layer.training and not x.is_inference():
                             return _grad_ckpt(_f, x, use_reentrant=False)
                         return _f(x)
                     return _cp
