@@ -225,6 +225,18 @@ class DetectionTrainer(BaseTrainer):
                 _patched += 1
         LOGGER.info(f"Gradient checkpointing applied to {_patched} neck blocks for semantic training")
 
+        # Disable torchinductor/dynamo compilation — prevents the combined YOLO+semantic
+        # backward from being compiled into a monolithic kernel that tries to allocate
+        # 6+ GiB in one shot (aten.index_put_ OOM at epoch sem_warmup+1).
+        # Eager autograd allocates incrementally and stays within GPU memory budget.
+        try:
+            import torch._dynamo
+            torch._dynamo.reset()
+            torch._dynamo.config.disable = True
+            LOGGER.info("Dynamo compilation disabled — prevents torchinductor OOM on semantic backward")
+        except Exception:
+            pass
+
         # Validate and resolve semantic hyperparameters before training starts
         init_tau   = float(getattr(self.args, "tau", 0.07))
 
