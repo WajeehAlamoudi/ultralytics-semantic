@@ -482,7 +482,9 @@ class v8DetectionLoss:
                 img_idx = img_idx[size_ok]
 
                 # ROI pool: one feature vector per GT box from neck feature maps
-                roi_feats = roi_pool_neck_features(feats, gt_boxes_xyxy, img_idx, img_size)  # (N_gt, C)
+                # detach feats — semantic loss trains proj_head only, not the backbone
+                feats_sem = [f.detach() for f in feats]
+                roi_feats = roi_pool_neck_features(feats_sem, gt_boxes_xyxy, img_idx, img_size)  # (N_gt, C)
                 text_embeds = comment_embeds.to(self.device)[size_ok]                         # (N_gt, 512)
                 valid = text_embeds.norm(dim=-1) > 0                                          # boxes with comments
                 if valid.sum() > 1:
@@ -510,7 +512,7 @@ class v8DetectionLoss:
                 if neg_valid.sum() > 1:
                     # global average pool all neck scales → one vector per image
                     img_feat = torch.cat(
-                        [f.mean(dim=[-2, -1]) for f in feats], dim=1
+                        [f.detach().mean(dim=[-2, -1]) for f in feats], dim=1
                     )[neg_valid].to(pred_scores.dtype)                             # (M, C)
                     img_proj = self.proj_head(img_feat)                            # (M, 512)
                     txt_neg = image_comment_embeds.to(self.device)[neg_valid].to(img_proj.dtype)
@@ -526,7 +528,7 @@ class v8DetectionLoss:
                 neg_scores = pred_scores[is_negative_mask].sigmoid()  # (num_neg, anchors, nc)
                 loss[5] = neg_scores.max(dim=-1).values.mean()        # mean max-class score
 
-            if sp is not None:
+            if sp is not None and sem_active:
                 loss[3] = sp.weight(loss[3], sp.log_sigma_sem, sp.fixed_sem)
                 loss[4] = sp.weight(loss[4], sp.log_sigma_neg, sp.fixed_neg)
                 loss[5] = sp.weight(loss[5], sp.log_sigma_fp,  sp.fixed_fp)
