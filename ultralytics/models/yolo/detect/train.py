@@ -23,6 +23,31 @@ from ultralytics.utils.patches import override_configs
 from ultralytics.utils.plotting import plot_images, plot_labels
 from ultralytics.utils.torch_utils import torch_distributed_zero_first, unwrap_model
 from ultralytics.utils.semantic import CLIPTextEncoder, SemanticLossParams, SemanticProjectionHead
+from torch.utils.checkpoint import checkpoint as _grad_ckpt
+
+
+class _GradCkptWrapper(nn.Module):
+    """Wraps a neck block with gradient checkpointing during training.
+
+    Uses self.wrapped(x) (i.e. __call__) for inference so AMP dtype handling,
+    model.half(), and model.eval() all propagate correctly through the registered
+    child module — none of which work when forward() is replaced by a plain function.
+    """
+
+    def __init__(self, wrapped):
+        super().__init__()
+        self.wrapped = wrapped  # registered child → model.half() / eval() propagate
+
+    def __getattr__(self, name):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.wrapped, name)  # forward f, i, type, np, etc.
+
+    def forward(self, x):
+        if self.training:
+            return _grad_ckpt(self.wrapped, x, use_reentrant=False)
+        return self.wrapped(x)  # __call__ path — AMP handles dtypes correctly
 
 
 class DetectionTrainer(BaseTrainer):
@@ -190,30 +215,7 @@ class DetectionTrainer(BaseTrainer):
         # Gradient checkpointing on neck blocks: recompute activations during backward
         # instead of storing them — fixes OOM when semantic loss extends the gradient
         # graph through neck features without touching imgsz or detaching gradients.
-        #
-        # We wrap as a proper nn.Module (not a forward-method swap) so that
-        # self.wrapped(x) goes through nn.Module.__call__ during inference,
-        # which preserves AMP dtype promotion, model.half() propagation, and
-        # model.eval() flag — all of which break when forward is replaced by a
-        # plain function that bypasses __call__.
-        from torch.utils.checkpoint import checkpoint as _grad_ckpt
-
-        class _GradCkptWrapper(nn.Module):
-            def __init__(self, wrapped):
-                super().__init__()
-                self.wrapped = wrapped  # registered child → model.half() / eval() propagate
-
-            def __getattr__(self, name):
-                try:
-                    return super().__getattr__(name)
-                except AttributeError:
-                    return getattr(self.wrapped, name)  # forward f, i, type, np, etc.
-
-            def forward(self, x):
-                if self.training:
-                    return _grad_ckpt(self.wrapped, x, use_reentrant=False)
-                return self.wrapped(x)  # __call__ path — AMP handles dtypes correctly
-
+        # _GradCkptWrapper is defined at module level (required for pickle/torch.save).
         _ckpt_types = {"C3k2", "C2PSA", "C2f", "C3"}
         _patched = 0
         _model_layers = unwrap_model(self.model).model
