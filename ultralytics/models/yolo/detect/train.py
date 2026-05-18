@@ -187,6 +187,24 @@ class DetectionTrainer(BaseTrainer):
             feat_dim = 256 * m.nl
         unwrap_model(self.model).proj_head = SemanticProjectionHead(feat_dim, embed_dim=512).to(self.device)
 
+        # Gradient checkpointing on neck blocks: recompute activations during backward
+        # instead of storing them — fixes OOM when semantic loss extends the gradient
+        # graph through neck features without touching imgsz or detaching gradients.
+        from torch.utils.checkpoint import checkpoint as _grad_ckpt
+
+        _ckpt_types = {"C3k2", "C2PSA", "C2f", "C3"}
+        _patched = 0
+        for _layer in unwrap_model(self.model).model:
+            if type(_layer).__name__ in _ckpt_types:
+                _orig_fwd = _layer.forward
+                def _make_cp(_f):
+                    def _cp(x):
+                        return _grad_ckpt(_f, x, use_reentrant=False)
+                    return _cp
+                _layer.forward = _make_cp(_orig_fwd)
+                _patched += 1
+        LOGGER.info(f"Gradient checkpointing applied to {_patched} neck blocks for semantic training")
+
         # Validate and resolve semantic hyperparameters before training starts
         init_tau   = float(getattr(self.args, "tau", 0.07))
 
