@@ -197,13 +197,13 @@ class DetectionTrainer(BaseTrainer):
         for _layer in unwrap_model(self.model).model:
             if type(_layer).__name__ in _ckpt_types:
                 _orig_fwd = _layer.forward
-                def _make_cp(_f):
+                def _make_cp(_layer, _f):
                     def _cp(x):
-                        if torch.is_grad_enabled():
+                        if _layer.training:
                             return _grad_ckpt(_f, x, use_reentrant=False)
                         return _f(x)
                     return _cp
-                _layer.forward = _make_cp(_orig_fwd)
+                _layer.forward = _make_cp(_layer, _orig_fwd)
                 _patched += 1
         LOGGER.info(f"Gradient checkpointing applied to {_patched} neck blocks for semantic training")
 
