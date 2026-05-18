@@ -201,6 +201,11 @@ class DetectionTrainer(BaseTrainer):
                     def _cp(x):
                         if _layer.training and not x.is_inference():
                             return _grad_ckpt(_f, x, use_reentrant=False)
+                        # Bound-method calls bypass nn.Module.__call__ AMP dispatcher;
+                        # cast x to match layer weight dtype to avoid fp16/fp32 mismatch.
+                        _p = next(_layer.parameters(), None)
+                        if _p is not None and x.is_floating_point() and x.dtype != _p.dtype:
+                            x = x.to(_p.dtype)
                         return _f(x)
                     return _cp
                 _layer.forward = _make_cp(_layer, _orig_fwd)
