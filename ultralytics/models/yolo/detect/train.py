@@ -46,7 +46,7 @@ class _GradCkptWrapper(nn.Module):
 
     def forward(self, x):
         if self.training:
-            return _grad_ckpt(self.wrapped, x, use_reentrant=False)
+            return _grad_ckpt(self.wrapped, x, use_reentrant=True)
         return self.wrapped(x)  # __call__ path — AMP handles dtypes correctly
 
 
