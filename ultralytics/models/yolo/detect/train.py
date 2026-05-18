@@ -199,7 +199,9 @@ class DetectionTrainer(BaseTrainer):
                 _orig_fwd = _layer.forward
                 def _make_cp(_f):
                     def _cp(x):
-                        return _grad_ckpt(_f, x, use_reentrant=False)
+                        if torch.is_grad_enabled():
+                            return _grad_ckpt(_f, x, use_reentrant=False)
+                        return _f(x)
                     return _cp
                 _layer.forward = _make_cp(_orig_fwd)
                 _patched += 1
