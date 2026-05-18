@@ -190,25 +190,36 @@ class DetectionTrainer(BaseTrainer):
         # Gradient checkpointing on neck blocks: recompute activations during backward
         # instead of storing them — fixes OOM when semantic loss extends the gradient
         # graph through neck features without touching imgsz or detaching gradients.
+        #
+        # We wrap as a proper nn.Module (not a forward-method swap) so that
+        # self.wrapped(x) goes through nn.Module.__call__ during inference,
+        # which preserves AMP dtype promotion, model.half() propagation, and
+        # model.eval() flag — all of which break when forward is replaced by a
+        # plain function that bypasses __call__.
         from torch.utils.checkpoint import checkpoint as _grad_ckpt
+
+        class _GradCkptWrapper(nn.Module):
+            def __init__(self, wrapped):
+                super().__init__()
+                self.wrapped = wrapped  # registered child → model.half() / eval() propagate
+
+            def __getattr__(self, name):
+                try:
+                    return super().__getattr__(name)
+                except AttributeError:
+                    return getattr(self.wrapped, name)  # forward f, i, type, np, etc.
+
+            def forward(self, x):
+                if self.training:
+                    return _grad_ckpt(self.wrapped, x, use_reentrant=False)
+                return self.wrapped(x)  # __call__ path — AMP handles dtypes correctly
 
         _ckpt_types = {"C3k2", "C2PSA", "C2f", "C3"}
         _patched = 0
-        for _layer in unwrap_model(self.model).model:
+        _model_layers = unwrap_model(self.model).model
+        for i, _layer in enumerate(_model_layers):
             if type(_layer).__name__ in _ckpt_types:
-                _orig_fwd = _layer.forward
-                def _make_cp(_layer, _f):
-                    def _cp(x):
-                        if _layer.training and not x.is_inference():
-                            return _grad_ckpt(_f, x, use_reentrant=False)
-                        # Bound-method calls bypass nn.Module.__call__ AMP dispatcher;
-                        # cast x to match layer weight dtype to avoid fp16/fp32 mismatch.
-                        _p = next(_layer.parameters(), None)
-                        if _p is not None and x.is_floating_point() and x.dtype != _p.dtype:
-                            x = x.to(_p.dtype)
-                        return _f(x)
-                    return _cp
-                _layer.forward = _make_cp(_layer, _orig_fwd)
+                _model_layers[i] = _GradCkptWrapper(_layer)
                 _patched += 1
         LOGGER.info(f"Gradient checkpointing applied to {_patched} neck blocks for semantic training")
 
