@@ -122,6 +122,8 @@ yolo detect train model=yolo26n.pt \
 
 ## Results
 
+![Baseline vs Semantic mAP50](assets/comparison_map50.png)
+
 Parking slot detection — YOLO26n, 50 epochs, batch=16, imgsz=640, A100 40GB.
 
 | Run | mAP50 | mAP50-95 | vs Baseline |
