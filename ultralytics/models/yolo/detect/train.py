@@ -491,7 +491,7 @@ class DetectionTrainer(BaseTrainer):
             with torch.no_grad():
                 for batch in self.test_loader:
                     batch = self.preprocess_batch(batch)
-                    comment_embeds = batch.get("image_comment_embeds")
+                    comment_embeds = batch.get("comment_embeds")
                     if comment_embeds is None:
                         continue
                     _neck_feats.clear()
