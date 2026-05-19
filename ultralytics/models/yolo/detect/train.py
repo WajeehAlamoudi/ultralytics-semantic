@@ -479,14 +479,26 @@ class DetectionTrainer(BaseTrainer):
             self.model.eval()
             vis_vecs, txt_vecs, cls_ids, comments_list = [], [], [], []
 
+            # Hook the Detect head to capture neck feature maps (list of P3/P4/P5 tensors).
+            # In inference mode model(img) returns raw tensors, not a dict with "feats".
+            _neck_feats: list = []
+            def _feat_hook(module, inp, out):
+                _neck_feats.clear()
+                _neck_feats.extend([f.detach().float() for f in inp[0]])
+            _detect_head = unwrap_model(self.model).model[-1]
+            _hook_handle = _detect_head.register_forward_hook(_feat_hook)
+
             with torch.no_grad():
                 for batch in self.test_loader:
                     batch = self.preprocess_batch(batch)
-                    comment_embeds = batch.get("comment_embeds")
+                    comment_embeds = batch.get("image_comment_embeds")
                     if comment_embeds is None:
                         continue
-                    preds  = self.model(batch["img"])
-                    feats  = preds["feats"]
+                    _neck_feats.clear()
+                    self.model(batch["img"])
+                    if not _neck_feats:
+                        continue
+                    feats  = _neck_feats
                     img_sz = batch["img"].shape[-1]
 
                     gt_boxes = batch["bboxes"].clone()
@@ -512,6 +524,7 @@ class DetectionTrainer(BaseTrainer):
                     if len(vis_vecs) >= 5:   # enough batches for a meaningful plot
                         break
 
+            _hook_handle.remove()
             self.model.train()
             if not vis_vecs:
                 return
@@ -557,6 +570,10 @@ class DetectionTrainer(BaseTrainer):
         except Exception as e:
             LOGGER.warning(f"Semantic space plot failed: {e}")
         finally:
+            try:
+                _hook_handle.remove()
+            except Exception:
+                pass
             self.model.train()
 
     def final_eval(self):
