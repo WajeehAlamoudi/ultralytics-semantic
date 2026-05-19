@@ -139,20 +139,35 @@ Parking slot detection — YOLO26n, 50 epochs, batch=16, imgsz=640, A100 40GB.
 - mAP50-95 is tied — semantic loss improves detection confidence, not box localization precision
 - `sem_loss` decreased 1.323 → 1.163 over 40 active epochs, confirming genuine alignment learning
 
+### Training Curves
+
+| Baseline | Semantic v4 |
+|---|---|
+| ![Baseline results](assets/baseline/results.png) | ![Semantic v4 results](assets/semantic_v4/results.png) |
+
+### Confusion Matrix
+
+| Baseline | Semantic v4 |
+|---|---|
+| ![Baseline confusion matrix](assets/baseline/confusion_matrix_normalized.png) | ![Semantic v4 confusion matrix](assets/semantic_v4/confusion_matrix_normalized.png) |
+
 ---
 
 ## Semantic Alignment Visualization
 
 The trainer generates similarity matrix and t-SNE plots of visual vs text embeddings every 10 epochs:
 
-```
-runs/detect/semantic_v4/
-├── semantic_epoch20.png   ← alignment at epoch 20
-├── semantic_epoch30.png   ← alignment at epoch 30
-├── semantic_epoch40.png   ← alignment at epoch 40
-├── semantic_epoch49.png   ← alignment at final epoch
-└── semantic_space.png     ← final embedding space (t-SNE / PCA)
-```
+| Epoch 20 | Epoch 30 |
+|---|---|
+| ![Epoch 20](assets/semantic_v4/semantic_epoch20.png) | ![Epoch 30](assets/semantic_v4/semantic_epoch30.png) |
+
+| Epoch 40 | Epoch 49 |
+|---|---|
+| ![Epoch 40](assets/semantic_v4/semantic_epoch40.png) | ![Epoch 49](assets/semantic_v4/semantic_epoch49.png) |
+
+### Final Embedding Space
+
+![Semantic space](assets/semantic_v4/semantic_space.png)
 
 Diagonal structure in the visual↔text similarity matrix indicates successful cross-modal alignment learning.
 
