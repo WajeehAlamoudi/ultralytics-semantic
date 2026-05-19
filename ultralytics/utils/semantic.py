@@ -3,7 +3,6 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.ops import roi_align
 
 
 class CLIPTextEncoder:
@@ -69,7 +68,11 @@ def roi_pool_neck_features(feats: list, boxes_xyxy: torch.Tensor, img_idx: torch
     pooled = []
     for feat in feats:
         scale = feat.shape[-1] / img_size          # spatial scale relative to input
-        roi_feat = roi_align(feat, rois, output_size=output_size, spatial_scale=scale, aligned=True)
+        # Call C++ CUDA extension directly — bypasses the Python roi_align wrapper which
+        # has a torch.compile hook that materializes a [K,C,PH,PW,IY,IX] bilinear tensor (~26 GiB).
+        roi_feat = torch.ops.torchvision.roi_align(
+            feat, rois, scale, output_size, output_size, -1, True
+        )
         roi_feat = roi_feat.mean(dim=[-2, -1])     # (N, C_i) — average pool spatial dims
         pooled.append(roi_feat)
     return torch.cat(pooled, dim=1)                # (N, sum(C_i))
