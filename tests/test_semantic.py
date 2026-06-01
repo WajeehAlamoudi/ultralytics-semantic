@@ -31,7 +31,7 @@ def test_sem_loss_params():
 
     sp = SemanticLossParams(init_tau=0.07)
 
-    # tau initialised correctly and clamped
+    # tau initialized correctly and clamped
     assert abs(sp.tau.item() - 0.07) < 1e-4, f"tau init wrong: {sp.tau.item()}"
     ok("SemanticLossParams tau init")
 
@@ -99,12 +99,14 @@ def test_roi_pool():
         torch.randn(B, 512, 20, 20),
     ]
     # 4 boxes: 2 per image
-    boxes = torch.tensor([
-        [100., 100., 300., 300.],
-        [200., 200., 400., 400.],
-        [ 50.,  50., 150., 150.],
-        [300., 100., 500., 400.],
-    ])
+    boxes = torch.tensor(
+        [
+            [100.0, 100.0, 300.0, 300.0],
+            [200.0, 200.0, 400.0, 400.0],
+            [50.0, 50.0, 150.0, 150.0],
+            [300.0, 100.0, 500.0, 400.0],
+        ]
+    )
     img_idx = torch.tensor([0, 0, 1, 1])
 
     out = roi_pool_neck_features(feats, boxes, img_idx, img_size)
@@ -122,7 +124,7 @@ def test_infonce():
     # build a perfect alignment scenario: vis == txt
     N = 8
     vecs = F.normalize(torch.randn(N, 512), dim=-1)
-    tau  = 0.07
+    tau = 0.07
 
     logits = (vecs @ vecs.T) / tau
     labels = torch.arange(N)
@@ -160,7 +162,7 @@ def test_clip_cache():
     ok("CLIPTextEncoder cache stores unique texts only")
 
     cache_size_before = len(enc._cache)
-    _ = enc.encode(["person running fast"])   # already cached
+    _ = enc.encode(["person running fast"])  # already cached
     assert len(enc._cache) == cache_size_before, "cache grew on repeated text"
     ok("CLIPTextEncoder cache hit — no recompute")
 
@@ -187,7 +189,7 @@ def test_guards():
     # here just verify clamp works at runtime
     sp2 = SemanticLossParams(init_tau=0.5)
     with torch.no_grad():
-        sp2.log_tau.fill_(math.log(0.001))   # below 0.01
+        sp2.log_tau.fill_(math.log(0.001))  # below 0.01
     assert sp2.tau.item() >= 0.01 - 1e-6
     ok("SemanticLossParams tau runtime clamp holds")
 
@@ -196,20 +198,20 @@ def test_guards():
 # Runner
 # ─────────────────────────────────────────────
 TESTS = [
-    ("SemanticLossParams",       test_sem_loss_params),
-    ("SemanticProjectionHead",   test_proj_head),
-    ("roi_pool_neck_features",   test_roi_pool),
-    ("InfoNCE correctness",      test_infonce),
-    ("CLIP cache",               test_clip_cache),
-    ("Validation guards",        test_guards),
+    ("SemanticLossParams", test_sem_loss_params),
+    ("SemanticProjectionHead", test_proj_head),
+    ("roi_pool_neck_features", test_roi_pool),
+    ("InfoNCE correctness", test_infonce),
+    ("CLIP cache", test_clip_cache),
+    ("Validation guards", test_guards),
 ]
 
 if __name__ == "__main__":
     passed = failed = 0
     for name, fn in TESTS:
-        print(f"\n{'─'*50}")
+        print(f"\n{'─' * 50}")
         print(f"  {name}")
-        print(f"{'─'*50}")
+        print(f"{'─' * 50}")
         try:
             fn()
             passed += 1
@@ -217,7 +219,7 @@ if __name__ == "__main__":
             fail(name, e)
             failed += 1
 
-    print(f"\n{'═'*50}")
+    print(f"\n{'═' * 50}")
     print(f"  Results: {passed} passed  |  {failed} failed")
-    print(f"{'═'*50}")
+    print(f"{'═' * 50}")
     sys.exit(0 if failed == 0 else 1)

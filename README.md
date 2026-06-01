@@ -6,7 +6,7 @@ A research extension of [Ultralytics YOLO](https://github.com/ultralytics/ultral
 
 ## Idea
 
-Standard YOLO training supervises box regression and classification but gives no signal about *what an object looks like in language*. This work adds a parallel loss that pulls visual neck features toward CLIP text embeddings of per-box descriptions:
+Standard YOLO training supervises box regression and classification but gives no signal about _what an object looks like in language_. This work adds a parallel loss that pulls visual neck features toward CLIP text embeddings of per-box descriptions:
 
 ```
 "empty parking slot facing left"  →  CLIP  →  text embedding (512-d)
@@ -48,24 +48,26 @@ Input Image
 ```
 
 **Kendall uncertainty weighting** (Kendall et al. 2018) automatically balances three semantic loss terms:
+
 - `sem_loss` — box-comment contrastive (main alignment signal)
 - `neg_loss` — scene-level negative contrast
-- `fp_loss`  — false positive penalty
+- `fp_loss` — false positive penalty
 
 ---
 
 ## Key Implementation Details
 
-| Component | File | Description |
-|---|---|---|
-| CLIP text encoder | `ultralytics/utils/semantic.py` | Frozen ViT-B/32, in-memory cache, unit-norm embeddings |
-| ROI feature pooling | `ultralytics/utils/semantic.py` | Direct `torch.ops.torchvision.roi_align` call (bypasses Python wrapper OOM) |
-| Projection head | `ultralytics/utils/semantic.py` | Linear(neck_dim, 256) → ReLU → Linear(256, 512) |
-| Loss weighting | `ultralytics/utils/semantic.py` | Kendall et al. learned uncertainty + fixed weight option |
-| Training integration | `ultralytics/models/yolo/detect/train.py` | Gradient checkpointing, dynamo disable, semantic warmup gate |
-| Loss computation | `ultralytics/utils/loss.py` | InfoNCE symmetric cross-entropy |
+| Component            | File                                      | Description                                                                 |
+| -------------------- | ----------------------------------------- | --------------------------------------------------------------------------- |
+| CLIP text encoder    | `ultralytics/utils/semantic.py`           | Frozen ViT-B/32, in-memory cache, unit-norm embeddings                      |
+| ROI feature pooling  | `ultralytics/utils/semantic.py`           | Direct `torch.ops.torchvision.roi_align` call (bypasses Python wrapper OOM) |
+| Projection head      | `ultralytics/utils/semantic.py`           | Linear(neck_dim, 256) → ReLU → Linear(256, 512)                             |
+| Loss weighting       | `ultralytics/utils/semantic.py`           | Kendall et al. learned uncertainty + fixed weight option                    |
+| Training integration | `ultralytics/models/yolo/detect/train.py` | Gradient checkpointing, dynamo disable, semantic warmup gate                |
+| Loss computation     | `ultralytics/utils/loss.py`               | InfoNCE symmetric cross-entropy                                             |
 
 **OOM fixes applied during development:**
+
 - `torch._dynamo.config.disable = True` — prevents torchinductor from compiling a monolithic backward kernel (~6.56 GiB spike)
 - `torch.ops.torchvision.roi_align` — direct C++ CUDA call, avoids Python wrapper's 26 GiB bilinear tensor materialization
 - Gradient checkpointing on 9 neck blocks with `use_reentrant=True`
@@ -83,6 +85,7 @@ Labels follow standard YOLO format with an extra `comment` field per box:
 ```
 
 Two datasets are used for controlled comparison:
+
 - `parking_baseline/` — same images and boxes, **no comments** → pure YOLO training
 - `parking_semantic/` — same images and boxes, **with comments** → semantic conditioning
 
@@ -91,6 +94,7 @@ Two datasets are used for controlled comparison:
 ## Training
 
 **Baseline (no semantic):**
+
 ```bash
 yolo detect train model=yolo26n.pt \
   data=parking_baseline/data.yaml \
@@ -100,6 +104,7 @@ yolo detect train model=yolo26n.pt \
 ```
 
 **Semantic conditioning:**
+
 ```bash
 yolo detect train model=yolo26n.pt \
   data=parking_semantic/data.yaml \
@@ -110,13 +115,13 @@ yolo detect train model=yolo26n.pt \
 
 **Key hyperparameters:**
 
-| Arg | Default | Description |
-|---|---|---|
-| `sem_warmup` | `5` | Epochs before semantic loss activates (`-1` = disable entirely) |
-| `tau` | `0.07` | InfoNCE temperature — `0.1` works best for dense same-class datasets |
-| `sem_weight` | `null` | Fixed semantic loss weight — `null` = Kendall auto-weighting |
-| `neg_weight` | `null` | Fixed negative loss weight |
-| `fp_weight` | `null` | Fixed false-positive loss weight |
+| Arg          | Default | Description                                                          |
+| ------------ | ------- | -------------------------------------------------------------------- |
+| `sem_warmup` | `5`     | Epochs before semantic loss activates (`-1` = disable entirely)      |
+| `tau`        | `0.07`  | InfoNCE temperature — `0.1` works best for dense same-class datasets |
+| `sem_weight` | `null`  | Fixed semantic loss weight — `null` = Kendall auto-weighting         |
+| `neg_weight` | `null`  | Fixed negative loss weight                                           |
+| `fp_weight`  | `null`  | Fixed false-positive loss weight                                     |
 
 ---
 
@@ -126,14 +131,14 @@ yolo detect train model=yolo26n.pt \
 
 Parking slot detection — YOLO26n, 50 epochs, batch=16, imgsz=640, A100 40GB.
 
-| Run | mAP50 | mAP50-95 | vs Baseline |
-|---|---|---|---|
-| Baseline | 0.872 | 0.663 | — |
-| semantic_v1 (τ=0.07, warmup=5) | 0.803 | 0.595 | −0.069 / −0.068 |
-| semantic_v2 (τ=0.2, warmup=15, w=0.1) | 0.836 | 0.601 | −0.036 / −0.062 |
-| semantic_v3 (τ=0.2, warmup=15, w=0.1) | 0.875 | 0.656 | +0.003 / −0.007 |
-| **semantic_v4 (τ=0.1, warmup=10, w=0.2)** | **0.890** | **0.660** | **+0.018 / −0.003** |
-| semantic_v5 (τ=0.1, warmup=10, w=0.2, repeat) | 0.886 | 0.661 | +0.014 / −0.002 |
+| Run                                           | mAP50     | mAP50-95  | vs Baseline         |
+| --------------------------------------------- | --------- | --------- | ------------------- |
+| Baseline                                      | 0.872     | 0.663     | —                   |
+| semantic_v1 (τ=0.07, warmup=5)                | 0.803     | 0.595     | −0.069 / −0.068     |
+| semantic_v2 (τ=0.2, warmup=15, w=0.1)         | 0.836     | 0.601     | −0.036 / −0.062     |
+| semantic_v3 (τ=0.2, warmup=15, w=0.1)         | 0.875     | 0.656     | +0.003 / −0.007     |
+| **semantic_v4 (τ=0.1, warmup=10, w=0.2)**     | **0.890** | **0.660** | **+0.018 / −0.003** |
+| semantic_v5 (τ=0.1, warmup=10, w=0.2, repeat) | 0.886     | 0.661     | +0.014 / −0.002     |
 
 **Best config: `tau=0.1, sem_weight=0.2, sem_warmup=10`**
 
@@ -143,14 +148,14 @@ Parking slot detection — YOLO26n, 50 epochs, batch=16, imgsz=640, A100 40GB.
 
 ### Training Curves
 
-| Baseline | Semantic v4 |
-|---|---|
+| Baseline                                         | Semantic v4                                            |
+| ------------------------------------------------ | ------------------------------------------------------ |
 | ![Baseline results](assets/baseline/results.png) | ![Semantic v4 results](assets/semantic_v4/results.png) |
 
 ### Confusion Matrix
 
-| Baseline | Semantic v4 |
-|---|---|
+| Baseline                                                                      | Semantic v4                                                                         |
+| ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
 | ![Baseline confusion matrix](assets/baseline/confusion_matrix_normalized.png) | ![Semantic v4 confusion matrix](assets/semantic_v4/confusion_matrix_normalized.png) |
 
 ---
@@ -159,12 +164,12 @@ Parking slot detection — YOLO26n, 50 epochs, batch=16, imgsz=640, A100 40GB.
 
 The trainer generates similarity matrix and t-SNE plots of visual vs text embeddings every 10 epochs:
 
-| Epoch 20 | Epoch 30 |
-|---|---|
+| Epoch 20                                             | Epoch 30                                             |
+| ---------------------------------------------------- | ---------------------------------------------------- |
 | ![Epoch 20](assets/semantic_v4/semantic_epoch20.png) | ![Epoch 30](assets/semantic_v4/semantic_epoch30.png) |
 
-| Epoch 40 | Epoch 49 |
-|---|---|
+| Epoch 40                                             | Epoch 49                                             |
+| ---------------------------------------------------- | ---------------------------------------------------- |
 | ![Epoch 40](assets/semantic_v4/semantic_epoch40.png) | ![Epoch 49](assets/semantic_v4/semantic_epoch49.png) |
 
 ### Final Embedding Space
@@ -204,11 +209,13 @@ ultralytics/
 ## Discussion
 
 **When semantic conditioning helps:**
+
 - Datasets where natural language descriptions add information beyond the visual signal
 - Multi-class scenarios where text resolves ambiguous category boundaries
 - Small datasets where the CLIP prior acts as a strong regularizer
 
 **When it doesn't help much:**
+
 - Highly homogeneous single-class datasets (all descriptions are near-identical)
 - When background/negative samples are too few to activate `neg_loss` and `fp_loss`
 
