@@ -220,14 +220,8 @@ def verify_image_label(args: tuple) -> list:
                 lines = [x for x in f.read().strip().splitlines() if len(x)]
                 lb_raw = [x.split("#", 1)[0].strip().split() for x in lines]
                 keep = [len(x) > 0 for x in lb_raw]
-                image_comment = " ".join(
-                    x.split("#", 1)[1].strip() for x, k in zip(lines, keep)
-                    if not k and "#" in x
-                )
-                comments = [
-                    x.split("#", 1)[1].strip() if "#" in x else ""
-                    for x, k in zip(lines, keep) if k
-                ]
+                image_comment = " ".join(x.split("#", 1)[1].strip() for x, k in zip(lines, keep) if not k and "#" in x)
+                comments = [x.split("#", 1)[1].strip() if "#" in x else "" for x, k in zip(lines, keep) if k]
                 lb = [x for x, k in zip(lb_raw, keep) if k]
                 if any(len(x) > 6 for x in lb) and (not keypoint):  # is segment
                     classes = np.array([x[0] for x in lb], dtype=np.float32)
@@ -275,6 +269,7 @@ def verify_image_label(args: tuple) -> list:
         nc = 1
         msg = f"{prefix}{im_file}: ignoring corrupt image/label: {e}"
         return [None, None, None, None, None, nm, nf, ne, nc, msg, [], ""]
+
 
 def visualize_image_annotations(image_path: str, txt_path: str, label_map: dict[int, str]):
     """Visualize YOLO annotations (bounding boxes and class labels) on an image.
