@@ -121,7 +121,7 @@ class YOLODataset(BaseDataset):
                 ),
             )
             pbar = TQDM(results, desc=desc, total=total)
-            for im_file, lb, shape, segments, keypoint, nm_f, nf_f, ne_f, nc_f, msg, comments,image_comment in pbar:
+            for im_file, lb, shape, segments, keypoint, nm_f, nf_f, ne_f, nc_f, msg, comments, image_comment in pbar:
                 nm += nm_f
                 nf += nf_f
                 ne += ne_f
@@ -303,9 +303,7 @@ class YOLODataset(BaseDataset):
                 value = torch.nn.utils.rnn.pad_sequence(value, batch_first=True)
             elif k == "comments":
                 value = [c for sample in value for c in sample]
-            elif k == "image_comment":
-                value = list(value)
-            elif k == "is_negative":
+            elif k == "image_comment" or k == "is_negative":
                 value = list(value)
             if k in {"masks", "keypoints", "bboxes", "cls", "segments", "obb"}:
                 value = torch.cat(value, 0)
